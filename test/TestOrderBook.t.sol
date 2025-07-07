@@ -7,6 +7,7 @@ import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockWBTC} from "./mocks/MockWBTC.sol";
 import {MockWETH} from "./mocks/MockWETH.sol";
 import {MockWSOL} from "./mocks/MockWSOL.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract TestOrderBook is Test {
     OrderBook book;
@@ -214,5 +215,152 @@ contract TestOrderBook is Test {
         book.withdrawFees(owner);
 
         assert(usdc.balanceOf(owner) == 5_559e6);
+    }
+
+    //@audit-poc 
+    function test_precision_loss_in_fee_calculation() external {
+        //Arrange
+        vm.startPrank(alice);
+        wbtc.approve(address(book), 2e8);
+        uint256 aliceId = book.createSellOrder(address(wbtc), 2e8, 0.000033e6, 2 days);
+        vm.stopPrank();
+
+        //Act
+        uint256 orderInUSDC = book.getOrder(aliceId).priceInUSDC;
+        uint256 protocolFee = (orderInUSDC * book.FEE()) / book.PRECISION();
+        
+        //Assert
+        assertEq(protocolFee, 0);
+    }
+
+    //@audit-poc
+    function test_seller_at_loss_than_buyer() external {
+        vm.startPrank(alice);
+        wbtc.approve(address(book), 2e8);
+        uint256 aliceId = book.createSellOrder(address(wbtc), 2e8, 180_000e6, 2 days);
+
+        uint256 orderInUSDC = book.getOrder(aliceId).priceInUSDC;
+        uint256 protocolFee = (orderInUSDC * book.FEE()) / book.PRECISION();
+        vm.stopPrank();
+        assertEq(wbtc.balanceOf(alice), 0);
+
+        vm.startPrank(dan);
+        usdc.approve(address(book), 180_000e6);
+        book.buyOrder(aliceId);
+        vm.stopPrank();
+
+        assertEq(wbtc.balanceOf(dan), 2e8);
+        assert(usdc.balanceOf(alice) == 174_600e6);
+        assert(usdc.balanceOf(address(book)) == protocolFee);
+    }
+
+    //@audit-poc
+    function test_Allow_Random_Address_As_Token_Address() external {
+        vm.prank(owner);
+        vm.expectEmit();
+        //using a random non-erc20 address - address(1)
+        emit OrderBook.TokenAllowed(address(1), true);
+        book.setAllowedSellToken(address(1), true);
+    }
+
+    //@audit-poc
+    function test_Decimal_Precision_Bug() public {
+        console2.log("=== DEMONSTRATING DECIMAL PRECISION ===");
+
+        // Alice creates orders for 1 WBTC and 1 WETH, both priced at $50,000 USDC
+        uint256 priceInUSDC = 50000e6; // $50,000 USDC
+
+        // WBTC order: 1 WBTC = 100000000 (8 decimals)
+        uint256 wbtcAmount = 1e8;
+        vm.startPrank(alice);
+        wbtc.approve(address(book), wbtcAmount);
+        uint256 wbtcOrderId = book.createSellOrder(address(wbtc), wbtcAmount, priceInUSDC, 3600);
+        vm.stopPrank();
+
+        // WETH order: 1 WETH = 1000000000000000000 (18 decimals)
+        uint256 wethAmount = 1e18;
+        vm.startPrank(bob);
+        weth.approve(address(book), wethAmount);
+        uint256 wethOrderId = book.createSellOrder(address(weth), wethAmount, priceInUSDC, 3600);
+        vm.stopPrank();
+
+        // Get order details
+        (,,, uint256 storedWbtcAmount, uint256 wbtcPrice,,) = book.orders(wbtcOrderId);
+        (,,, uint256 storedWethAmount, uint256 wethPrice,,) = book.orders(wethOrderId);
+
+        console2.log("WBTC Order - Amount:", storedWbtcAmount);
+        console2.log("WBTC Order - Price:", wbtcPrice);
+        console2.log("WETH Order - Amount:", storedWethAmount);
+        console2.log("WETH Order - Price:", wethPrice);
+
+        // Calculate price per token unit (this shows the bug)
+        // Note: WETH calculation will result in 0 due to integer division
+        uint256 wbtcPricePerUnit = wbtcPrice / storedWbtcAmount;
+        uint256 wethPricePerUnit = wethPrice / storedWethAmount; // This will be 0!
+
+        console2.log("WBTC Price per unit:", wbtcPricePerUnit);
+        console2.log("WETH Price per unit:", wethPricePerUnit);
+
+        // The bug: WETH price per unit becomes 0 due to integer division
+        // while WBTC has a meaningful price per unit
+        assertEq(wethPricePerUnit, 0);
+        assertGt(wbtcPricePerUnit, 0);
+
+        console2.log("WETH price per unit is 0, while WBTC has meaningful price!");
+    }
+    
+    //@audit-poc
+    function testEmergencyWithdraw() external {
+        TestToken token = new TestToken();
+
+        vm.prank(owner);
+        book.setAllowedSellToken(address(token), true);
+
+        vm.startPrank(alice);
+        token.mint(alice, 2e18);
+        token.approve(address(book), 2e18);
+        book.createSellOrder(address(token), 2e18, 3000e6, 3600);
+        vm.stopPrank();
+
+        assertEq(token.balanceOf(address(book)), 2e18);
+
+        vm.prank(owner);
+        vm.expectEmit();
+        emit OrderBook.EmergencyWithdrawal(address(token), 0, owner);
+        book.emergencyWithdrawERC20(address(token), 0, owner);
+    }
+
+    //@audit-poc 
+    function test_EmergencyWithdrawal_Of_NonCoreTokens() external {
+        TestToken token = new TestToken();
+
+        vm.prank(owner);
+        book.setAllowedSellToken(address(token), true);
+
+        vm.startPrank(alice);
+        token.mint(alice, 2e18);
+        token.approve(address(book), 2e18);
+        book.createSellOrder(address(token), 2e18, 3000e6, 3600);
+        vm.stopPrank();
+
+        assertEq(token.balanceOf(address(book)), 2e18);
+
+        vm.prank(owner);
+        vm.expectEmit();
+        emit OrderBook.EmergencyWithdrawal(address(token), 2e18, owner);
+        book.emergencyWithdrawERC20(address(token), 2e18, owner);
+
+        assertEq(token.balanceOf(address(book)), 0);
+        assertEq(token.balanceOf(owner), 2e18);
+    }
+
+}
+
+contract TestToken is ERC20 {
+    constructor() ERC20("Test", "TT"){
+    }
+
+    function mint(address account, uint256 amount) external {
+        _mint(account, amount);
     }
 }
