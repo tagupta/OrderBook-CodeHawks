@@ -11,7 +11,7 @@ header-includes:
 \centering
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.5\textwidth]{image.pdf}
+\includegraphics[width=0.5\textwidth]{logo.pdf}
 \end{figure}
 \vspace{2cm}
 {\Huge\bfseries Order Book Protocol Audit Report - CodeHawks\par}
@@ -28,6 +28,7 @@ header-includes:
 <!-- Your report starts here! -->
 
 Prepared by: [Tanu Gupta](https://github.com/tagupta)
+
 Lead Security Researcher:
 
 - Tanu Gupta
